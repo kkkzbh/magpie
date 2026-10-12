@@ -422,6 +422,57 @@ func FetchNew(timeout time.Duration) {
 	}
 }
 
+// newListedFirst is how long after the gateway starts KeepNewListed first
+// asks, models.dev's sync at start-up having had its turn; newListedEvery
+// is how often it asks after that.
+var (
+	newListedFirst = time.Minute
+	newListedEvery = time.Minute
+)
+
+// KeepNewListed runs FetchNew in the magpie serving the gateway, a little
+// after it starts and every newListedEvery after. The app asks at start-up
+// and on each /api/state read; `magpie serve` had nothing that asked, so a
+// headless gateway offered each signed-in account magpie's built-in list
+// (WorkBuddy AI's 16, Cursor's Auto alone) until `magpie provider refresh`
+// (#1805). Accounts that have their list are skipped, and one whose list
+// couldn't be had waits newFetchRetry, so this asks a vendor only for a
+// first try that failed or an account signed in since.
+func KeepNewListed(ctx context.Context) {
+	first, every := newListedFirst, newListedEvery
+	t := time.NewTimer(first)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		FetchNew(20 * time.Second)
+		t.Reset(every)
+	}
+}
+
+// NewListedForTest has KeepNewListed first ask after first and again every
+// every, with no account's last try remembered, until the returned function
+// runs. Tests outside this package use it.
+func NewListedForTest(first, every time.Duration) func() {
+	oldFirst, oldEvery := newListedFirst, newListedEvery
+	newListedFirst, newListedEvery = first, every
+	newFetches.Lock()
+	newFetches.m = map[string]time.Time{}
+	newFetches.Unlock()
+	return func() {
+		newListedFirst, newListedEvery = oldFirst, oldEvery
+		newFetches.Lock()
+		newFetches.m = map[string]time.Time{}
+		newFetches.Unlock()
+	}
+}
+
 // fetchOne asks the first endpoint that answers, with p's key.
 func (p Provider) fetchOne(ctx context.Context) ([]catalog.Model, string, error) {
 	if u := strings.TrimSpace(p.ModelsURL); u != "" {
